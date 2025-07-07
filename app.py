@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import psycopg2
+import numpy as np
 
 # Import functions from existing modules
 from data_analysis.analysis import load_ratings, load_movies, load_users
@@ -23,7 +24,7 @@ db_config = {
     "port": "5432"
 }
 
-
+# This function
 def ensure_recommendation_table(db_config):
     with psycopg2.connect(**db_config) as conn:
         with conn.cursor() as cursor:
@@ -66,12 +67,24 @@ page = st.sidebar.selectbox(
 # Load data
 @st.cache_data
 def load_data():
-    ratings = load_ratings("data/ml-100k/u.data")
-    movies = load_movies("data/ml-100k/u.item")
-    users = load_users("data/ml-100k/u.user")
+    # ratings = load_ratings("data/ml-100k/u.data")
+    # movies = load_movies("data/ml-100k/u.item")
+    # users = load_users("data/ml-100k/u.user")
+    # return ratings, movies, users
+
+    with psycopg2.connect(**db_config) as conn:
+        ratings = pd.read_sql_query("SELECT * FROM ratings", conn)
+        movies = pd.read_sql_query("SELECT * FROM movies", conn)
+        users = pd.read_sql_query("SELECT * FROM users", conn)
     return ratings, movies, users
 
+st.cache_data.clear()
 ratings, movies, users = load_data()
+
+print("** Rating ***",ratings.columns)
+print("** movies ***",movies.columns)
+print("** users ***",users.columns)
+
 
 # ============================================================================
 # DASHBOARD PAGE
@@ -97,13 +110,16 @@ if page == "Dashboard":
     
     # Popular movies
     st.subheader("🎬 Most Popular Movies")
+    # st.markdown("**X-axis:** Number of ratings (popularity count)  \n**Y-axis:** Movie title")
+
     popular_movies = ratings.merge(movies[['movie_id', 'title']], on='movie_id')['title'].value_counts().head(10)
-    
+
     fig = px.bar(
         x=popular_movies.values, 
         y=popular_movies.index, 
         orientation='h',
-        title="Top 10 Most Popular Movies"
+        title="Top 10 Most Popular Movies",
+        labels={"x": "Number of Ratings", "y": "Movie Title"}
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -179,6 +195,61 @@ elif page == "Data Analysis":
             fig_gender = px.pie(values=gender_counts.values, names=gender_counts.index, title="Gender Distribution")
             st.plotly_chart(fig_gender, use_container_width=True)
 
+        # --- Top 5 Movies Loved by Males and Females ---
+        # Join ratings, users, and movies
+        ratings_users_movies = ratings.merge(users[['user_id', 'gender']], on='user_id').merge(
+            movies[['movie_id', 'title']], on='movie_id'
+        )
+
+        def get_top_movies_by_gender(df, gender, top_n=5, min_ratings=10):
+            gender_df = df[df['gender'] == gender]
+            movie_stats = (
+                gender_df.groupby('title')['rating']
+                .agg(['mean', 'count'])
+                .reset_index()
+                .rename(columns={'mean': 'avg_rating', 'count': 'num_ratings'})
+            )
+            # Filter to movies with at least min_ratings
+            movie_stats = movie_stats[movie_stats['num_ratings'] >= min_ratings]
+            top_movies = movie_stats.sort_values('avg_rating', ascending=False).head(top_n)
+            return top_movies
+
+        top_male_movies = get_top_movies_by_gender(ratings_users_movies, 'M', top_n=5)
+        top_female_movies = get_top_movies_by_gender(ratings_users_movies, 'F', top_n=5)
+
+        # List of genre columns (update if your schema uses different names)
+        genre_columns = [
+            'unknown', 'action', 'adventure', 'animation', 'children', 'comedy', 'crime',
+            'documentary', 'drama', 'fantasy', 'filmnoir', 'horror', 'musical', 'mystery',
+            'romance', 'scifi', 'thriller', 'war', 'western'
+        ]
+
+        def get_movie_genres(movie_row):
+            return [genre for genre in genre_columns if movie_row.get(genre, 0) == 1]
+
+        def make_movie_genre_table(top_movies, movies_df):
+            # Merge to get genre columns for each movie
+            merged = top_movies.merge(movies_df[['title'] + genre_columns], on='title', how='left')
+            # Build a DataFrame with movie and genres
+            data = []
+            for _, row in merged.iterrows():
+                genres = get_movie_genres(row)
+                data.append({'Movie Title': row['title'], 'Genres': ', '.join(genres)})
+            return pd.DataFrame(data)
+
+        # Tables for males and females
+        male_table = make_movie_genre_table(top_male_movies, movies)
+        female_table = make_movie_genre_table(top_female_movies, movies)
+
+        col3, col4 = st.columns(2)
+        with col3:
+            st.subheader("Top 5 Movies Loved by Males (with Genres)")
+            st.dataframe(male_table, use_container_width=True)
+
+        with col4:
+            st.subheader("Top 5 Movies Loved by Females (with Genres)")
+            st.dataframe(female_table, use_container_width=True)
+
 # ============================================================================
 # RECOMMENDATIONS PAGE
 # ============================================================================
@@ -219,24 +290,35 @@ elif page == "Recommendations":
     else:
         st.warning("This user has no ratings yet.")
     
-    # Generate recommendations button
+    # Generate Recommendations button
     if st.button("🎯 Generate Recommendations", type="primary"):
         with st.spinner("Generating recommendations..."):
             try:
                 recommendations = run_recommender(user_id, num_recommendations)
-                
-                # Save recommendations to PostgreSQL
-                # recommended_movie_recommendates = recommendations['movie_recommendate'].tolist()
-                recommended_movie_recommendates = recommendations['title'].tolist()
-                save_recommendations(user_id, recommended_movie_recommendates, db_config)
-                
-                st.subheader(f"🎬 Recommended Movies for User {user_id}")
-                
-                for i, (_, row) in enumerate(recommendations.iterrows(), 1):
-                    st.write(f"**{i}.** {row['title']} (Predicted Rating: {row['predicted_rating']:.2f}/5)")
-                
+                st.session_state['last_recommendations'] = recommendations
+                st.session_state['last_user_id'] = user_id
+                st.success("Recommendations generated! Scroll down to save them.")
             except Exception as e:
                 st.error(f"Error generating recommendations: {str(e)}")
+
+    # Display recommendations if present
+    if 'last_recommendations' in st.session_state and st.session_state['last_recommendations'] is not None:
+        recommendations = st.session_state['last_recommendations']
+        display_user_id = st.session_state.get('last_user_id')
+        if display_user_id is None:
+            display_user_id = user_id
+        st.subheader(f"🎬 Recommended Movies for User {display_user_id}")
+        for i, (_, row) in enumerate(recommendations.iterrows(), 1):
+            st.write(f"**{i}.** {row['title']} (Predicted Rating: {row['predicted_rating']:.2f}/5)")
+
+        if st.button("💾 Save Recommendations"):
+            recommended_titles = recommendations['title'].astype(str).tolist()
+            try:
+                uid = int(display_user_id)
+            except (TypeError, ValueError):
+                uid = int(user_id)
+            save_recommendations(uid, recommended_titles, db_config)
+            st.success("Recommendations saved to the database!")
 
 # ============================================================================
 # MODEL EVALUATION PAGE
@@ -254,52 +336,40 @@ elif page == "Model Evaluation":
         test_size = st.slider("Test Size:", 0.1, 0.5, 0.2, 0.05)
     
     with col2:
-        k_neighbors = st.slider("K Neighbors:", 5, 20, 10)
+        k_min = st.slider("Min K:", 2, 10, 2)
     
     with col3:
-        random_state = st.number_input("Random State:", value=42, min_value=1, max_value=1000)
+        k_max = st.slider("Max K:", 10, 50, 20)
     
-    # Run evaluation button
-    if st.button("🚀 Run Evaluation", type="primary"):
-        with st.spinner("Evaluating model performance..."):
-            try:
-                # Split data
-                train_df, test_df = train_test_split(ratings, test_size=test_size, random_state=random_state)
-                
-                # Evaluate model
-                rmse, mae, count = evaluate_model(train_df, test_df, k=k_neighbors)
-                
-                # Display results
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.metric("RMSE", f"{rmse:.4f}")
-                
-                with col2:
-                    st.metric("MAE", f"{mae:.4f}")
-                
-                with col3:
-                    st.metric("Test Samples", f"{count:,}")
-                
-                # Performance interpretation
-                st.subheader("📈 Performance Analysis")
-                
-                if rmse < 1.0:
-                    st.success("✅ Excellent performance! RMSE below 1.0 indicates very good predictions.")
-                elif rmse < 1.5:
-                    st.info("ℹ️ Good performance! RMSE between 1.0-1.5 indicates reasonable predictions.")
-                else:
-                    st.warning("⚠️ Performance could be improved. Consider tuning hyperparameters.")
-                
-                # Show sample data
-                st.subheader("🔍 Sample Test Data")
-                st.dataframe(test_df[['user_id', 'movie_id', 'rating']].head(10))
-                
-            except Exception as e:
-                st.error(f"Error during evaluation: {str(e)}")
+    if st.button("🔍 Find Optimal K (Elbow Method)"):
+        with st.spinner("Evaluating K values..."):
+            from sklearn.model_selection import train_test_split
+
+            train_df, test_df = train_test_split(ratings, test_size=test_size, random_state=42)
+            k_values = list(range(k_min, k_max + 1))
+            rmse_scores = []
+            for k in k_values:
+                try:
+                    rmse, mae, count = evaluate_model(train_df, test_df, k=k)
+                    rmse_scores.append(rmse)
+                except Exception as e:
+                    rmse_scores.append(np.nan)  # In case of error, skip this k
+
+            # Find the elbow (minimum RMSE)
+            min_rmse = np.nanmin(rmse_scores)
+            best_k = k_values[np.nanargmin(rmse_scores)]
+
+            fig = px.line(
+                x=k_values, y=rmse_scores,
+                labels={"x": "K (Number of Neighbors)", "y": "RMSE"},
+                title="Elbow Method for Optimal K"
+            )
+            fig.add_scatter(x=[best_k], y=[min_rmse], mode='markers+text', text=[f"Best K={best_k}"], textposition="top center", marker=dict(size=12, color='red'), name="Optimal K")
+            st.plotly_chart(fig, use_container_width=True)
+            st.success(f"Optimal K (elbow point) is {best_k} with RMSE={min_rmse:.4f}")
 
 # Footer
 st.markdown("---")
-st.markdown("Made with Aditya Kaushal | Movie Recommendation")
+st.markdown("Made by Aditya Kaushal | Movie Recommendation")
 
 

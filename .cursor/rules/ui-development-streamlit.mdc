@@ -1,0 +1,22 @@
+# 🚀 STREAMLIT UI DEVELOPMENT RULES (for Cursor AI)
+
+## 🧱 Code Style
+- Use standard Python formatting (PEP8)
+- Use `snake_case` for all function and variable names
+- Keep functions short, clear, and focused on one task
+- Add comments before every function describing its purpose
+
+## 🖼️ UI Design in Streamlit
+- Use `st.columns()` to organize buttons horizontally
+- Use consistent layout with proper spacing and sectioning
+- Keep UI and logic **separated** — layout in one place, logic in another
+- Prefer reusable component functions: `render_sidebar()`, `render_header()`
+
+## 🔘 Buttons and Interactivity
+- Assign a unique `key` to every `st.button`, `st.text_input`, etc.
+- Use `st.session_state` to store button clicks and app states
+- Always wrap logic inside a function and call it inside the `if st.button()` block
+
+```python
+if st.button("Run", key="run_btn"):
+    run_analysis()
